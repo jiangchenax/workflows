@@ -71,9 +71,9 @@ function toArray(value, fallback = []) {
 }
 
 function normalizeTarget(item, index) {
-  const defaultTimeoutMs = Number(env("DEFAULT_TIMEOUT_MS", "90000"));
+  const defaultTimeoutMs = Number(env("DEFAULT_TIMEOUT_MS", "45000"));
   const defaultWaitUntil = env("DEFAULT_WAIT_UNTIL", "domcontentloaded");
-  const defaultMaxRetries = Number(env("DEFAULT_MAX_RETRIES", "2"));
+  const defaultMaxRetries = Number(env("DEFAULT_MAX_RETRIES", "1"));
 
   if (typeof item === "string") {
     return {
@@ -88,8 +88,6 @@ function normalizeTarget(item, index) {
       expectedSelector: "body"
     };
   }
-
-  const login = item.login || null;
 
   return {
     name: item.name || `Target ${index + 1}`,
@@ -115,7 +113,7 @@ function normalizeTarget(item, index) {
     clickSelector: item.clickSelector || null,
     waitAfterClickMs: item.waitAfterClickMs || 0,
 
-    login,
+    login: item.login || null,
 
     extraHeaders: item.extraHeaders || {},
     cookies: item.cookies || []
@@ -124,6 +122,7 @@ function normalizeTarget(item, index) {
 
 function loadTargets() {
   const manualUrl = env("MANUAL_TARGET_URL");
+
   if (manualUrl) {
     return [
       normalizeTarget(
@@ -163,34 +162,48 @@ async function locatorExists(page, selector, timeoutMs = 2500) {
 }
 
 async function clickFirstVisible(page, selectors, options = {}) {
-  const timeoutMs = options.timeoutMs || 3000;
+  const timeoutMs = options.timeoutMs || 5000;
   const label = options.label || "element";
 
+  console.log(`[keepalive] Trying to click: ${label}`);
+
   for (const selector of selectors) {
+    console.log(`[keepalive]   selector: ${selector}`);
+
     const locator = await locatorExists(page, selector, timeoutMs);
     if (!locator) continue;
 
     try {
       await locator.click({ timeout: timeoutMs });
+      console.log(`[keepalive] Clicked ${label} with selector: ${selector}`);
       return selector;
-    } catch {}
+    } catch (error) {
+      console.log(`[keepalive] Click failed for selector ${selector}: ${error.message}`);
+    }
   }
 
   throw new Error(`未找到或无法点击：${label}。尝试过的选择器：${selectors.join(" | ")}`);
 }
 
 async function fillFirstVisible(page, selectors, value, options = {}) {
-  const timeoutMs = options.timeoutMs || 5000;
+  const timeoutMs = options.timeoutMs || 8000;
   const label = options.label || "input";
 
+  console.log(`[keepalive] Trying to fill: ${label}`);
+
   for (const selector of selectors) {
+    console.log(`[keepalive]   selector: ${selector}`);
+
     const locator = await locatorExists(page, selector, timeoutMs);
     if (!locator) continue;
 
     try {
       await locator.fill(value, { timeout: timeoutMs });
+      console.log(`[keepalive] Filled ${label} with selector: ${selector}`);
       return selector;
-    } catch {}
+    } catch (error) {
+      console.log(`[keepalive] Fill failed for selector ${selector}: ${error.message}`);
+    }
   }
 
   throw new Error(`未找到或无法填写：${label}。尝试过的选择器：${selectors.join(" | ")}`);
@@ -200,6 +213,7 @@ async function takeScreenshot(page, target, suffix = "") {
   if (!target.screenshot) return null;
 
   ensureDir(SCREENSHOT_DIR);
+
   const id = hashId(`${target.name}|${target.url}`);
   const safeName = sanitizeFileName(target.name);
   const fileName = `${safeName}_${id}${suffix}.png`;
@@ -208,18 +222,26 @@ async function takeScreenshot(page, target, suffix = "") {
   try {
     await page.screenshot({
       path: screenshotPath,
-      fullPage: target.fullPageScreenshot
+      fullPage: target.fullPageScreenshot,
+      timeout: 10000
     });
+    console.log(`[keepalive] Screenshot saved: ${screenshotPath}`);
     return screenshotPath;
-  } catch {
+  } catch (error) {
+    console.log(`[keepalive] Screenshot failed: ${error.message}`);
     return null;
   }
 }
 
 async function loginIfNeeded(page, target) {
-  if (!target.login) return;
+  if (!target.login) {
+    console.log("[keepalive] No login config, skip login.");
+    return;
+  }
 
   const login = target.login;
+
+  console.log(`[keepalive] Opening login URL: ${login.loginUrl || target.url}`);
 
   if (login.loginUrl) {
     await page.goto(login.loginUrl, {
@@ -229,6 +251,7 @@ async function loginIfNeeded(page, target) {
   }
 
   await page.waitForLoadState("domcontentloaded", { timeout: target.timeoutMs }).catch(() => {});
+  await sleep(1000);
 
   let authPage = page;
 
@@ -237,47 +260,56 @@ async function loginIfNeeded(page, target) {
     "button:has-text(\"Sign In with Google\")",
     "button:has-text(\"Continue with Google\")",
     "a:has-text(\"Sign in with Google\")",
+    "a:has-text(\"Continue with Google\")",
     "div:has-text(\"Sign in with Google\")",
+    "div:has-text(\"Continue with Google\")",
     "text=Sign in with Google",
     "text=Continue with Google",
     "[aria-label*=\"Google\"]",
     "[data-provider*=\"google\" i]"
   ]);
 
-  if (providerSelectors.length > 0) {
-    const popupPromise = page.waitForEvent("popup", {
-      timeout: login.popupTimeoutMs || 8000
-    }).catch(() => null);
+  console.log("[keepalive] Step 1: clicking Sign in with Google");
 
-    await clickFirstVisible(page, providerSelectors, {
-      timeoutMs: login.providerButtonTimeoutMs || target.timeoutMs,
-      label: "Sign in with Google 按钮"
-    });
+  const popupPromise = page.waitForEvent("popup", {
+    timeout: login.popupTimeoutMs || 6000
+  }).catch(() => null);
 
-    const popup = await popupPromise;
+  await clickFirstVisible(page, providerSelectors, {
+    timeoutMs: login.providerButtonTimeoutMs || 5000,
+    label: "Sign in with Google 按钮"
+  });
 
-    if (popup) {
-      authPage = popup;
-      await authPage.waitForLoadState("domcontentloaded", {
-        timeout: target.timeoutMs
-      }).catch(() => {});
-    } else {
-      authPage = page;
-      await authPage.waitForLoadState("domcontentloaded", {
-        timeout: target.timeoutMs
-      }).catch(() => {});
-    }
+  const popup = await popupPromise;
 
-    if (login.waitAfterProviderClickMs) {
-      await sleep(login.waitAfterProviderClickMs);
-    }
+  if (popup) {
+    console.log("[keepalive] Google login opened in popup.");
+    authPage = popup;
+    await authPage.waitForLoadState("domcontentloaded", {
+      timeout: target.timeoutMs
+    }).catch(() => {});
+  } else {
+    console.log("[keepalive] Google login may be in current page.");
+    authPage = page;
+    await authPage.waitForLoadState("domcontentloaded", {
+      timeout: target.timeoutMs
+    }).catch(() => {});
   }
+
+  if (login.waitAfterProviderClickMs) {
+    await sleep(login.waitAfterProviderClickMs);
+  } else {
+    await sleep(2000);
+  }
+
+  console.log(`[keepalive] Auth page URL after Google click: ${authPage.url()}`);
 
   const useAnotherAccountSelectors = toArray(login.useAnotherAccountSelectors || login.useAnotherAccountSelector, []);
   if (useAnotherAccountSelectors.length > 0) {
+    console.log("[keepalive] Trying Use another account if visible.");
     try {
       await clickFirstVisible(authPage, useAnotherAccountSelectors, {
-        timeoutMs: login.useAnotherAccountTimeoutMs || 3000,
+        timeoutMs: login.useAnotherAccountTimeoutMs || 2500,
         label: "Use another account"
       });
 
@@ -286,7 +318,9 @@ async function loginIfNeeded(page, target) {
       }).catch(() => {});
 
       await sleep(login.waitAfterUseAnotherAccountMs || 1000);
-    } catch {}
+    } catch (error) {
+      console.log(`[keepalive] Use another account skipped: ${error.message}`);
+    }
   }
 
   const email = env(login.usernameEnv || "APP_LOGIN_EMAIL");
@@ -298,8 +332,10 @@ async function loginIfNeeded(page, target) {
     "#identifierId"
   ]);
 
+  console.log("[keepalive] Step 2: filling Google email");
+
   await fillFirstVisible(authPage, usernameSelectors, email, {
-    timeoutMs: target.timeoutMs,
+    timeoutMs: login.usernameTimeoutMs || 15000,
     label: "邮箱输入框"
   });
 
@@ -312,8 +348,10 @@ async function loginIfNeeded(page, target) {
     "text=下一步"
   ]);
 
+  console.log("[keepalive] Step 3: clicking email Next");
+
   await clickFirstVisible(authPage, emailNextSelectors, {
-    timeoutMs: target.timeoutMs,
+    timeoutMs: login.emailNextTimeoutMs || 10000,
     label: "邮箱后的下一步按钮"
   });
 
@@ -327,6 +365,8 @@ async function loginIfNeeded(page, target) {
     timeout: target.timeoutMs
   }).catch(() => {});
 
+  console.log(`[keepalive] Auth page URL after email next: ${authPage.url()}`);
+
   const password = env(login.passwordEnv || "APP_LOGIN_PASSWORD");
   if (!password) throw new Error(`登录密码 Secret 为空：${login.passwordEnv || "APP_LOGIN_PASSWORD"}`);
 
@@ -335,8 +375,10 @@ async function loginIfNeeded(page, target) {
     "input[name=\"Passwd\"]"
   ]);
 
+  console.log("[keepalive] Step 4: filling Google password");
+
   await fillFirstVisible(authPage, passwordSelectors, password, {
-    timeoutMs: target.timeoutMs,
+    timeoutMs: login.passwordTimeoutMs || 15000,
     label: "密码输入框"
   });
 
@@ -350,8 +392,10 @@ async function loginIfNeeded(page, target) {
     "button[type=\"submit\"]"
   ]);
 
+  console.log("[keepalive] Step 5: clicking password Next");
+
   await clickFirstVisible(authPage, passwordNextSelectors, {
-    timeoutMs: target.timeoutMs,
+    timeoutMs: login.passwordNextTimeoutMs || 10000,
     label: "密码后的下一步/登录按钮"
   });
 
@@ -382,8 +426,9 @@ async function loginIfNeeded(page, target) {
   }
 
   if (authPage !== page) {
+    console.log("[keepalive] Waiting Google popup to close.");
     await authPage.waitForEvent("close", {
-      timeout: login.popupCloseTimeoutMs || 20000
+      timeout: login.popupCloseTimeoutMs || 15000
     }).catch(() => {});
   }
 
@@ -392,23 +437,34 @@ async function loginIfNeeded(page, target) {
   }).catch(() => {});
 
   if (target.url) {
+    console.log(`[keepalive] Opening target URL after login: ${target.url}`);
     await page.goto(target.url, {
       waitUntil: target.waitUntil || "domcontentloaded",
       timeout: target.timeoutMs
-    }).catch(() => {});
+    }).catch((error) => {
+      console.log(`[keepalive] page.goto target after login failed: ${error.message}`);
+    });
   }
 
   if (login.successSelector) {
+    console.log(`[keepalive] Waiting success selector: ${login.successSelector}`);
     await page.waitForSelector(login.successSelector, {
-      timeout: login.successTimeoutMs || target.timeoutMs
+      timeout: login.successTimeoutMs || 20000
     });
   }
+
+  console.log("[keepalive] Login flow finished.");
 }
 
 async function evaluatePage(page, target) {
+  console.log("[keepalive] Evaluating target page.");
+
   const title = await page.title().catch(() => "");
   const currentUrl = page.url();
   const bodyText = await page.locator("body").innerText({ timeout: 10000 }).catch(() => "");
+
+  console.log(`[keepalive] Page title: ${title}`);
+  console.log(`[keepalive] Page URL: ${currentUrl}`);
 
   if (target.expectedTitleIncludes && !title.includes(target.expectedTitleIncludes)) {
     return {
@@ -473,7 +529,13 @@ async function checkTarget(browser, target) {
   let lastResult = null;
   let screenshotPath = null;
 
+  console.log(`[keepalive] Begin target: ${target.name}`);
+  console.log(`[keepalive] Target URL: ${target.url}`);
+  console.log(`[keepalive] Max retries: ${target.maxRetries}`);
+
   for (let attempt = 1; attempt <= target.maxRetries; attempt++) {
+    console.log(`[keepalive] Attempt ${attempt}/${target.maxRetries}`);
+
     const context = await browser.newContext({
       viewport: target.viewport,
       userAgent: target.userAgent,
@@ -493,6 +555,7 @@ async function checkTarget(browser, target) {
     try {
       await loginIfNeeded(page, target);
 
+      console.log(`[keepalive] Going to final target URL: ${target.url}`);
       const response = await page.goto(target.url, {
         waitUntil: target.waitUntil,
         timeout: target.timeoutMs
@@ -501,7 +564,8 @@ async function checkTarget(browser, target) {
       const status = response ? response.status() : null;
 
       if (target.clickSelector) {
-        await page.click(target.clickSelector, { timeout: target.timeoutMs });
+        console.log(`[keepalive] Clicking post-login selector: ${target.clickSelector}`);
+        await page.click(target.clickSelector, { timeout: 10000 });
         if (target.waitAfterClickMs) await sleep(target.waitAfterClickMs);
       }
 
@@ -530,11 +594,14 @@ async function checkTarget(browser, target) {
 
       await context.close();
 
+      console.log(`[keepalive] Target result: ok=${lastResult.ok}, reason=${lastResult.reason}`);
+
       if (evaluation.ok) return lastResult;
 
       lastError = evaluation.reason;
     } catch (error) {
       lastError = `${error.name || "Error"}: ${error.message || String(error)}`;
+      console.log(`[keepalive] Target error: ${lastError}`);
 
       screenshotPath = await takeScreenshot(page, target, "_error");
 
@@ -839,23 +906,29 @@ function updateFailureMarker(report) {
 async function main() {
   ensureDir(SCREENSHOT_DIR);
 
-  await sleep(Math.floor(Math.random() * 2500));
+  console.log("[keepalive] Script started.");
+  console.log(`[keepalive] UTC now: ${nowUtc()}`);
+
+  await sleep(Math.floor(Math.random() * 1500));
 
   const previousState = readJson(STATE_FILE, { targets: {} });
   const targets = loadTargets();
 
+  console.log(`[keepalive] Loaded targets: ${targets.length}`);
+  for (const target of targets) {
+    console.log(`[keepalive] Target: ${target.name} -> ${target.url}`);
+  }
+
   const browser = await chromium.launch({
-    headless: true,
-    args: [
-      "--disable-blink-features=AutomationControlled",
-      "--no-sandbox"
-    ]
+    headless: true
   });
 
   const results = [];
 
   for (const target of targets) {
+    console.log(`[keepalive] Checking target: ${target.name}`);
     const result = await checkTarget(browser, target);
+    console.log(`[keepalive] Result for ${target.name}: ok=${result.ok}, reason=${result.reason}`);
     results.push(result);
   }
 
@@ -875,6 +948,7 @@ async function main() {
   writeJson(REPORT_FILE, report);
   updateFailureMarker(report);
 
+  console.log("[keepalive] Final summary:");
   console.log(JSON.stringify(report.summary, null, 2));
   console.log("notificationOutputs:", notifyOutputs);
 }
