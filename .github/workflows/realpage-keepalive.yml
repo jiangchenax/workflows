@@ -28,7 +28,6 @@ jobs:
     timeout-minutes: 15
 
     env:
-      # 提前切到 Node.js 24，消除 Node 20 deprecation warning
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
       MANUAL_TARGET_URL: ${{ github.event.inputs.target_url }}
@@ -45,12 +44,16 @@ jobs:
       DEFAULT_WAIT_UNTIL: "domcontentloaded"
       DEFAULT_MAX_RETRIES: "2"
 
+      # false：网页失败也不让 GitHub Actions 标红，只在报告和通知里显示
+      # true：网页失败就让 GitHub Actions 标红
+      STRICT_FAIL: "false"
+
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Restore keepalive state
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v5
         continue-on-error: true
         with:
           path: .realpage_state.json
@@ -59,7 +62,7 @@ jobs:
             realpage-state-
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: "24"
 
@@ -90,9 +93,16 @@ jobs:
             echo "No failed marker"
           fi
 
+      - name: Ensure state file exists
+        if: always()
+        run: |
+          if [ ! -f .realpage_state.json ]; then
+            echo '{"updatedAtUtc":"","targets":{}}' > .realpage_state.json
+          fi
+
       - name: Save keepalive state
         if: always()
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v5
         continue-on-error: true
         with:
           path: .realpage_state.json
@@ -100,7 +110,7 @@ jobs:
 
       - name: Upload screenshots and reports
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: realpage-keepalive-report
           path: |
@@ -110,8 +120,8 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-      - name: Mark workflow failed if page unhealthy
-        if: ${{ hashFiles('.realpage_failed') != '' }}
+      - name: Mark workflow failed if strict mode enabled
+        if: ${{ env.STRICT_FAIL == 'true' && hashFiles('.realpage_failed') != '' }}
         run: |
-          echo "真实业务页面检测失败。请查看上方 realpage_report.json 和 Artifacts 里的截图。"
+          echo "真实业务页面检测失败，且 STRICT_FAIL=true，因此标记 workflow 失败。"
           exit 1
