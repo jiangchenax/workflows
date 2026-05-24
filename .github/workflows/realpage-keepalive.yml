@@ -1,19 +1,198 @@
-##***group***Run node scripts/realpage-keepalive.mjs
-***36;1mnode scripts/realpage-keepalive.mjs***0m
-shell: /usr/bin/bash -e ***0***
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-  MANUAL_TARGET_URL: 
-  TARGETS_JSON: ***
-  APP_LOGIN_EMAIL: ***
-  APP_LOGIN_PASSWORD: ***
-  NOTIFY_MODE: failure
-  TELEGRAM_BOT_TOKEN: 
-  TELEGRAM_CHAT_ID: 
-  DISCORD_WEBHOOK_URL: 
-  SLACK_WEBHOOK_URL: 
-  DEFAULT_TIMEOUT_MS: 90000
-  DEFAULT_WAIT_UNTIL: domcontentloaded
-  DEFAULT_MAX_RETRIES: 2
-  STRICT_FAIL: false
-##***endgroup***
+name: Real Page Keepalive
+
+on:
+  schedule:
+    # 每 15 分钟运行一次，UTC 时间，避开整点
+    - cron: "7,22,37,52 * * * *"
+
+  workflow_dispatch:
+    inputs:
+      notify_mode:
+        description: "通知模式：change / failure / always / off"
+        required: false
+        default: "failure"
+      target_url:
+        description: "临时测试 URL，可留空"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: realpage-keepalive
+  cancel-in-progress: false
+
+jobs:
+  realpage-keepalive:
+    name: Real Page Keepalive
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+      MANUAL_TARGET_URL: ${{ github.event.inputs.target_url || '' }}
+      TARGETS_JSON: ${{ secrets.REALPAGE_TARGETS_JSON }}
+
+      APP_LOGIN_EMAIL: ${{ secrets.APP_LOGIN_EMAIL }}
+      APP_LOGIN_PASSWORD: ${{ secrets.APP_LOGIN_PASSWORD }}
+
+      NOTIFY_MODE: ${{ github.event.inputs.notify_mode || vars.NOTIFY_MODE || 'failure' }}
+
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+      SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+      DEFAULT_TIMEOUT_MS: "45000"
+      DEFAULT_WAIT_UNTIL: "domcontentloaded"
+      DEFAULT_MAX_RETRIES: "1"
+
+      # false：网页检测失败也不让 GitHub Actions 红，只在报告和截图里显示
+      # true：网页检测失败时让 GitHub Actions 标红
+      STRICT_FAIL: "false"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          package-manager-cache: false
+
+      - name: Check project files
+        run: |
+          echo "===== Current directory ====="
+          pwd
+
+          echo ""
+          echo "===== Repository files ====="
+          ls -la
+
+          echo ""
+          echo "===== package.json ====="
+          if [ -f package.json ]; then
+            cat package.json
+          else
+            echo "package.json not found"
+            exit 1
+          fi
+
+          echo ""
+          echo "===== scripts directory ====="
+          if [ -d scripts ]; then
+            ls -la scripts
+          else
+            echo "scripts directory not found"
+            exit 1
+          fi
+
+          echo ""
+          echo "===== keepalive script ====="
+          if [ -f scripts/realpage-keepalive.mjs ]; then
+            echo "scripts/realpage-keepalive.mjs found"
+          else
+            echo "scripts/realpage-keepalive.mjs not found"
+            exit 1
+          fi
+
+      - name: Install dependencies
+        run: |
+          if [ -f package-lock.json ]; then
+            echo "package-lock.json found, using npm ci"
+            npm ci
+          else
+            echo "package-lock.json not found, using npm install"
+            npm install
+          fi
+
+          npx playwright install --with-deps chromium
+
+      - name: Run real page keepalive
+        timeout-minutes: 7
+        continue-on-error: true
+        run: |
+          echo "===== Start real page keepalive ====="
+          date -u
+
+          set +e
+          timeout 360s node scripts/realpage-keepalive.mjs
+          CODE=$?
+
+          echo "===== Keepalive finished with code: $CODE ====="
+          echo "KEEPALIVE_EXIT_CODE=$CODE" >> "$GITHUB_ENV"
+
+          if [ "$CODE" = "124" ]; then
+            echo "Node script timed out after 360 seconds"
+            echo '{"fatalError":"node script timed out after 360 seconds"}' > realpage_report.json
+            echo "timeout" > .realpage_failed
+          elif [ "$CODE" != "0" ]; then
+            echo "Node script exited with non-zero code: $CODE"
+            if [ ! -f realpage_report.json ]; then
+              echo '{"fatalError":"node script exited with non-zero code"}' > realpage_report.json
+            fi
+            echo "failed" > .realpage_failed
+          fi
+
+          exit 0
+
+      - name: Print report for debugging
+        if: always()
+        run: |
+          echo "===== realpage_report.json ====="
+          if [ -f realpage_report.json ]; then
+            cat realpage_report.json
+          else
+            echo "realpage_report.json not found"
+          fi
+
+          echo ""
+          echo "===== .realpage_failed ====="
+          if [ -f .realpage_failed ]; then
+            cat .realpage_failed
+          else
+            echo "No failed marker"
+          fi
+
+          echo ""
+          echo "===== screenshots ====="
+          if [ -d screenshots ]; then
+            find screenshots -maxdepth 2 -type f -print
+          else
+            echo "screenshots directory not found"
+          fi
+
+      - name: Ensure report files exist
+        if: always()
+        run: |
+          if [ ! -f realpage_report.json ]; then
+            echo '{"error":"realpage_report.json not generated"}' > realpage_report.json
+          fi
+
+          if [ ! -f .realpage_state.json ]; then
+            echo '{"updatedAtUtc":"","targets":{}}' > .realpage_state.json
+          fi
+
+      - name: Upload screenshots and reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        continue-on-error: true
+        with:
+          name: realpage-keepalive-report
+          path: |
+            realpage_report.json
+            .realpage_state.json
+            .realpage_failed
+            screenshots/
+          if-no-files-found: ignore
+          include-hidden-files: true
+          retention-days: 7
+
+      - name: Mark workflow failed if strict mode enabled
+        if: ${{ env.STRICT_FAIL == 'true' && hashFiles('.realpage_failed') != '' }}
+        run: |
+          echo "真实业务页面检测失败，且 STRICT_FAIL=true，因此标记 workflow 失败。"
+          exit 1
