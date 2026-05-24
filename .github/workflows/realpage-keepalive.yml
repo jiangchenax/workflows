@@ -2,7 +2,6 @@ name: Real Page Keepalive
 
 on:
   schedule:
-    # 每 15 分钟运行一次，UTC 时间，避开整点
     - cron: "7,22,37,52 * * * *"
 
   workflow_dispatch:
@@ -49,8 +48,6 @@ jobs:
       DEFAULT_WAIT_UNTIL: "domcontentloaded"
       DEFAULT_MAX_RETRIES: "1"
 
-      # false：网页检测失败也不让 GitHub Actions 红，只在报告和截图里显示
-      # true：网页检测失败时让 GitHub Actions 标红
       STRICT_FAIL: "false"
 
     steps:
