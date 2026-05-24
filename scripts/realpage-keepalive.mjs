@@ -390,6 +390,12 @@ function messageMatches(parsed, magicLinkConfig, startedAtMs) {
   return true;
 }
 
+function detachMailbox(client) {
+  try {
+    client.logout().catch(() => {});
+  } catch {}
+}
+
 async function fetchMagicLinkFromMailbox(magicLinkConfig, startedAtMs) {
   const user = env(magicLinkConfig.mailboxUserEnv || "MAILBOX_EMAIL");
   const pass = env(magicLinkConfig.mailboxPasswordEnv || "MAILBOX_APP_PASSWORD");
@@ -467,18 +473,18 @@ async function fetchMagicLinkFromMailbox(magicLinkConfig, startedAtMs) {
 
         if (matched) {
           console.log(`[keepalive] Selected magic link host/path: ${maskUrl(matched)}`);
-          await client.logout().catch(() => {});
           console.log(`[keepalive] Magic link found: ${maskUrl(matched)}`);
+
+          detachMailbox(client);
+
           return matched;
         }
       }
 
-      await client.logout().catch(() => {});
+      detachMailbox(client);
     } catch (error) {
       console.log(`[keepalive] Mailbox polling error: ${error.message}`);
-      try {
-        await client.logout();
-      } catch {}
+      detachMailbox(client);
     }
 
     await sleep(pollIntervalMs);
