@@ -2,6 +2,8 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { chromium } from "playwright";
+import { ImapFlow } from "imapflow";
+import { simpleParser } from "mailparser";
 
 const STATE_FILE = ".realpage_state.json";
 const REPORT_FILE = "realpage_report.json";
@@ -71,7 +73,7 @@ function toArray(value, fallback = []) {
 }
 
 function normalizeTarget(item, index) {
-  const defaultTimeoutMs = Number(env("DEFAULT_TIMEOUT_MS", "45000"));
+  const defaultTimeoutMs = Number(env("DEFAULT_TIMEOUT_MS", "60000"));
   const defaultWaitUntil = env("DEFAULT_WAIT_UNTIL", "domcontentloaded");
   const defaultMaxRetries = Number(env("DEFAULT_MAX_RETRIES", "1"));
 
@@ -152,41 +154,6 @@ function loadTargets() {
   return parsed.map((item, index) => normalizeTarget(item, index));
 }
 
-async function printInputDebug(page, label = "input debug") {
-  try {
-    const currentUrl = page.url();
-    const title = await page.title().catch(() => "");
-
-    const inputs = await page.locator("input").evaluateAll((els) =>
-      els.map((el, index) => ({
-        index,
-        type: el.getAttribute("type"),
-        name: el.getAttribute("name"),
-        id: el.getAttribute("id"),
-        ariaLabel: el.getAttribute("aria-label"),
-        autocomplete: el.getAttribute("autocomplete"),
-        placeholder: el.getAttribute("placeholder"),
-        className: el.getAttribute("class"),
-        jsname: el.getAttribute("jsname"),
-        dataInitialValue: el.getAttribute("data-initial-value"),
-        visible: !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length),
-        disabled: el.hasAttribute("disabled"),
-        readOnly: el.hasAttribute("readonly")
-      }))
-    );
-
-    const bodyText = await page.locator("body").innerText({ timeout: 5000 }).catch(() => "");
-
-    console.log(`[keepalive] ${label}`);
-    console.log(`[keepalive] Current URL: ${currentUrl}`);
-    console.log(`[keepalive] Page title: ${title}`);
-    console.log(`[keepalive] Body text preview: ${bodyText.slice(0, 800)}`);
-    console.log(`[keepalive] Inputs: ${JSON.stringify(inputs, null, 2)}`);
-  } catch (error) {
-    console.log(`[keepalive] ${label} failed: ${error.message}`);
-  }
-}
-
 async function locatorExists(page, selector, timeoutMs = 2500) {
   try {
     const locator = page.locator(selector).first();
@@ -224,7 +191,6 @@ async function clickFirstVisible(page, selectors, options = {}) {
 async function fillFirstVisible(page, selectors, value, options = {}) {
   const timeoutMs = options.timeoutMs || 15000;
   const label = options.label || "input";
-  const debugOnFailure = options.debugOnFailure !== false;
 
   console.log(`[keepalive] Trying to fill: ${label}`);
 
@@ -239,9 +205,7 @@ async function fillFirstVisible(page, selectors, value, options = {}) {
         const locator = page.locator(selector).first();
 
         const count = await locator.count().catch(() => 0);
-        if (count <= 0) {
-          continue;
-        }
+        if (count <= 0) continue;
 
         await locator.waitFor({ state: "attached", timeout: 1500 }).catch(() => {});
 
@@ -267,10 +231,6 @@ async function fillFirstVisible(page, selectors, value, options = {}) {
     }
 
     await sleep(1000);
-  }
-
-  if (debugOnFailure) {
-    await printInputDebug(page, `未找到 ${label} 时页面上的 input 列表`);
   }
 
   throw new Error(
@@ -302,238 +262,308 @@ async function takeScreenshot(page, target, suffix = "") {
   }
 }
 
+function maskUrl(url) {
+  try {
+    const u = new URL(url);
+    return `${u.origin}${u.pathname}`;
+  } catch {
+    return "[invalid-url]";
+  }
+}
+
+function decodeHtmlEntities(text) {
+  return String(text || "")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, "\"")
+    .replace(/&#39;/g, "'");
+}
+
+function extractLinksFromText(text) {
+  const decoded = decodeHtmlEntities(text || "");
+  const links = new Set();
+
+  const hrefRegex = /href\s*=\s*["']([^"']+)["']/gi;
+  for (const match of decoded.matchAll(hrefRegex)) {
+    links.add(match[1]);
+  }
+
+  const urlRegex = /https?:\/\/[^\s"'<>]+/gi;
+  for (const match of decoded.matchAll(urlRegex)) {
+    links.add(match[0]);
+  }
+
+  return [...links]
+    .map((link) => decodeHtmlEntities(link).replace(/[)\].,;]+$/g, ""))
+    .filter((link) => {
+      try {
+        new URL(link);
+        return true;
+      } catch {
+        return false;
+      }
+    });
+}
+
+function linkMatches(link, magicLinkConfig) {
+  const hostIncludes = toArray(magicLinkConfig.linkHostIncludes, []);
+  const linkIncludes = toArray(magicLinkConfig.linkIncludes, []);
+
+  let url;
+  try {
+    url = new URL(link);
+  } catch {
+    return false;
+  }
+
+  if (hostIncludes.length > 0) {
+    const hostOk = hostIncludes.some((item) =>
+      url.hostname.toLowerCase().includes(String(item).toLowerCase())
+    );
+    if (!hostOk) return false;
+  }
+
+  if (linkIncludes.length > 0) {
+    const linkOk = linkIncludes.some((item) =>
+      link.toLowerCase().includes(String(item).toLowerCase())
+    );
+    if (!linkOk) return false;
+  }
+
+  return true;
+}
+
+function messageMatches(parsed, magicLinkConfig, startedAtMs) {
+  const subjectIncludes = toArray(magicLinkConfig.subjectIncludes, []);
+  const fromIncludes = toArray(magicLinkConfig.fromIncludes, []);
+
+  const subject = String(parsed.subject || "");
+  const fromText = String(parsed.from?.text || "");
+  const dateMs = parsed.date ? parsed.date.getTime() : 0;
+
+  const newerThanMs = startedAtMs - Number(magicLinkConfig.allowOlderByMs || 120000);
+  if (dateMs && dateMs < newerThanMs) return false;
+
+  if (subjectIncludes.length > 0) {
+    const ok = subjectIncludes.some((item) =>
+      subject.toLowerCase().includes(String(item).toLowerCase())
+    );
+    if (!ok) return false;
+  }
+
+  if (fromIncludes.length > 0) {
+    const ok = fromIncludes.some((item) =>
+      fromText.toLowerCase().includes(String(item).toLowerCase())
+    );
+    if (!ok) return false;
+  }
+
+  return true;
+}
+
+async function fetchMagicLinkFromMailbox(magicLinkConfig, startedAtMs) {
+  const user = env(magicLinkConfig.mailboxUserEnv || "MAILBOX_EMAIL");
+  const pass = env(magicLinkConfig.mailboxPasswordEnv || "MAILBOX_APP_PASSWORD");
+
+  if (!user) throw new Error(`邮箱账号 Secret 为空：${magicLinkConfig.mailboxUserEnv || "MAILBOX_EMAIL"}`);
+  if (!pass) throw new Error(`邮箱 App Password Secret 为空：${magicLinkConfig.mailboxPasswordEnv || "MAILBOX_APP_PASSWORD"}`);
+
+  const host = magicLinkConfig.imapHost || "imap.gmail.com";
+  const port = Number(magicLinkConfig.imapPort || 993);
+  const secure = magicLinkConfig.imapSecure !== false;
+
+  const pollTimeoutMs = Number(magicLinkConfig.pollTimeoutMs || 180000);
+  const pollIntervalMs = Number(magicLinkConfig.pollIntervalMs || 10000);
+  const mailbox = magicLinkConfig.mailbox || "INBOX";
+
+  const deadline = Date.now() + pollTimeoutMs;
+  let lastSeenSubjects = [];
+
+  console.log(`[keepalive] Connecting mailbox via IMAP: ${host}:${port}, mailbox=${mailbox}`);
+  console.log(`[keepalive] Polling magic link email for up to ${pollTimeoutMs}ms`);
+
+  while (Date.now() < deadline) {
+    const client = new ImapFlow({
+      host,
+      port,
+      secure,
+      auth: {
+        user,
+        pass
+      },
+      logger: false
+    });
+
+    try {
+      await client.connect();
+      await client.mailboxOpen(mailbox);
+
+      const sinceDate = new Date(startedAtMs - Number(magicLinkConfig.allowOlderByMs || 120000));
+      const uids = await client.search({ since: sinceDate });
+
+      const recentUids = uids.slice(-20).reverse();
+      console.log(`[keepalive] Recent candidate emails: ${recentUids.length}`);
+
+      for await (const msg of client.fetch(recentUids, {
+        uid: true,
+        envelope: true,
+        source: true
+      })) {
+        const parsed = await simpleParser(msg.source);
+
+        const subject = String(parsed.subject || "");
+        const fromText = String(parsed.from?.text || "");
+        lastSeenSubjects.push(subject);
+
+        console.log(`[keepalive] Checking email subject="${subject}", from="${fromText}"`);
+
+        if (!messageMatches(parsed, magicLinkConfig, startedAtMs)) {
+          continue;
+        }
+
+        const content = [
+          parsed.html || "",
+          parsed.textAsHtml || "",
+          parsed.text || ""
+        ].join("\n");
+
+        const links = extractLinksFromText(content);
+        console.log(`[keepalive] Candidate links in matching email: ${links.length}`);
+
+        const matched = links.find((link) => linkMatches(link, magicLinkConfig));
+        if (matched) {
+          await client.logout().catch(() => {});
+          console.log(`[keepalive] Magic link found: ${maskUrl(matched)}`);
+          return matched;
+        }
+      }
+
+      await client.logout().catch(() => {});
+    } catch (error) {
+      console.log(`[keepalive] Mailbox polling error: ${error.message}`);
+      try {
+        await client.logout();
+      } catch {}
+    }
+
+    await sleep(pollIntervalMs);
+  }
+
+  const tailSubjects = lastSeenSubjects.slice(-10).join(" | ");
+  throw new Error(`等待登录邮件超时。最近看到的邮件主题：${tailSubjects}`);
+}
+
+async function loginWithEmailMagicLink(page, target) {
+  const login = target.login;
+  const startedAtMs = Date.now();
+
+  console.log(`[keepalive] Opening login URL: ${login.loginUrl || target.url}`);
+
+  await page.goto(login.loginUrl || target.url, {
+    waitUntil: login.waitUntil || "domcontentloaded",
+    timeout: target.timeoutMs
+  });
+
+  await page.waitForLoadState("domcontentloaded", { timeout: target.timeoutMs }).catch(() => {});
+  await sleep(login.waitAfterOpenMs || 1500);
+
+  const emailLinkButtonSelectors = toArray(login.emailLinkButtonSelectors || login.emailLinkButtonSelector, [
+    "button:has-text(\"Email me a link\")",
+    "text=Email me a link",
+    "button:has-text(\"Email\")",
+    "text=Email",
+    "button:has-text(\"Continue with email\")",
+    "text=Continue with email",
+    "button:has-text(\"Sign in with email\")",
+    "text=Sign in with email"
+  ]);
+
+  console.log("[keepalive] Step 1: clicking Email me a link");
+  await clickFirstVisible(page, emailLinkButtonSelectors, {
+    timeoutMs: login.emailLinkButtonTimeoutMs || 10000,
+    label: "Email me a link 按钮"
+  });
+
+  await sleep(login.waitAfterEmailLinkClickMs || 1500);
+
+  const email = env(login.emailEnv || "APP_LOGIN_EMAIL");
+  if (!email) throw new Error(`登录邮箱 Secret 为空：${login.emailEnv || "APP_LOGIN_EMAIL"}`);
+
+  const emailInputSelectors = toArray(login.emailInputSelectors || login.emailInputSelector, [
+    "input[type=\"email\"]",
+    "input[name=\"email\"]",
+    "input[autocomplete=\"email\"]",
+    "input[placeholder*=\"email\" i]",
+    "input[aria-label*=\"email\" i]",
+    "input"
+  ]);
+
+  console.log("[keepalive] Step 2: filling email address");
+  await fillFirstVisible(page, emailInputSelectors, email, {
+    timeoutMs: login.emailInputTimeoutMs || 15000,
+    label: "邮箱输入框"
+  });
+
+  const emailSubmitSelectors = toArray(login.emailSubmitSelectors || login.emailSubmitSelector, [
+    "button:has-text(\"Email me a link\")",
+    "button:has-text(\"Send\")",
+    "button:has-text(\"Continue\")",
+    "button:has-text(\"Submit\")",
+    "text=Email me a link",
+    "text=Send",
+    "text=Continue",
+    "button[type=\"submit\"]"
+  ]);
+
+  console.log("[keepalive] Step 3: submitting email link request");
+  await clickFirstVisible(page, emailSubmitSelectors, {
+    timeoutMs: login.emailSubmitTimeoutMs || 15000,
+    label: "发送登录链接按钮"
+  });
+
+  await sleep(login.waitAfterSubmitMs || 5000);
+
+  if (!login.magicLink) {
+    throw new Error("login.magicLink 未配置，无法读取邮箱里的登录链接。");
+  }
+
+  console.log("[keepalive] Step 4: polling mailbox for magic link email");
+  const magicLink = await fetchMagicLinkFromMailbox(login.magicLink, startedAtMs);
+
+  console.log(`[keepalive] Step 5: opening magic link: ${maskUrl(magicLink)}`);
+  await page.goto(magicLink, {
+    waitUntil: target.waitUntil || "domcontentloaded",
+    timeout: target.timeoutMs
+  });
+
+  await page.waitForLoadState("domcontentloaded", { timeout: target.timeoutMs }).catch(() => {});
+  await sleep(login.waitAfterMagicLinkOpenMs || 8000);
+
+  if (login.successSelector) {
+    console.log(`[keepalive] Waiting success selector: ${login.successSelector}`);
+    await page.waitForSelector(login.successSelector, {
+      timeout: login.successTimeoutMs || 30000
+    });
+  }
+
+  console.log("[keepalive] Email magic link login flow finished.");
+}
+
 async function loginIfNeeded(page, target) {
   if (!target.login) {
     console.log("[keepalive] No login config, skip login.");
     return;
   }
 
-  const login = target.login;
+  const method = target.login.method || "email_magic_link";
 
-  console.log(`[keepalive] Opening login URL: ${login.loginUrl || target.url}`);
-
-  if (login.loginUrl) {
-    await page.goto(login.loginUrl, {
-      waitUntil: login.waitUntil || "domcontentloaded",
-      timeout: target.timeoutMs
-    });
+  if (method === "email_magic_link") {
+    await loginWithEmailMagicLink(page, target);
+    return;
   }
 
-  await page.waitForLoadState("domcontentloaded", { timeout: target.timeoutMs }).catch(() => {});
-  await sleep(1000);
-
-  let authPage = page;
-
-  const providerSelectors = toArray(login.providerButtonSelectors || login.providerButtonSelector, [
-    "button:has-text(\"Sign in with Google\")",
-    "button:has-text(\"Sign In with Google\")",
-    "button:has-text(\"Continue with Google\")",
-    "a:has-text(\"Sign in with Google\")",
-    "a:has-text(\"Continue with Google\")",
-    "div:has-text(\"Sign in with Google\")",
-    "div:has-text(\"Continue with Google\")",
-    "text=Sign in with Google",
-    "text=Continue with Google",
-    "[aria-label*=\"Google\"]",
-    "[data-provider*=\"google\" i]"
-  ]);
-
-  console.log("[keepalive] Step 1: clicking Sign in with Google");
-
-  const popupPromise = page.waitForEvent("popup", {
-    timeout: login.popupTimeoutMs || 6000
-  }).catch(() => null);
-
-  await clickFirstVisible(page, providerSelectors, {
-    timeoutMs: login.providerButtonTimeoutMs || 5000,
-    label: "Sign in with Google 按钮"
-  });
-
-  const popup = await popupPromise;
-
-  if (popup) {
-    console.log("[keepalive] Google login opened in popup.");
-    authPage = popup;
-    await authPage.waitForLoadState("domcontentloaded", {
-      timeout: target.timeoutMs
-    }).catch(() => {});
-  } else {
-    console.log("[keepalive] Google login may be in current page.");
-    authPage = page;
-    await authPage.waitForLoadState("domcontentloaded", {
-      timeout: target.timeoutMs
-    }).catch(() => {});
-  }
-
-  if (login.waitAfterProviderClickMs) {
-    await sleep(login.waitAfterProviderClickMs);
-  } else {
-    await sleep(2000);
-  }
-
-  console.log(`[keepalive] Auth page URL after Google click: ${authPage.url()}`);
-
-  const useAnotherAccountSelectors = toArray(login.useAnotherAccountSelectors || login.useAnotherAccountSelector, []);
-  if (useAnotherAccountSelectors.length > 0) {
-    console.log("[keepalive] Trying Use another account if visible.");
-    try {
-      await clickFirstVisible(authPage, useAnotherAccountSelectors, {
-        timeoutMs: login.useAnotherAccountTimeoutMs || 2500,
-        label: "Use another account"
-      });
-
-      await authPage.waitForLoadState("domcontentloaded", {
-        timeout: target.timeoutMs
-      }).catch(() => {});
-
-      await sleep(login.waitAfterUseAnotherAccountMs || 1000);
-    } catch (error) {
-      console.log(`[keepalive] Use another account skipped: ${error.message}`);
-    }
-  }
-
-  const email = env(login.usernameEnv || "APP_LOGIN_EMAIL");
-  if (!email) {
-    throw new Error(`登录邮箱 Secret 为空：${login.usernameEnv || "APP_LOGIN_EMAIL"}`);
-  }
-
-  const usernameSelectors = toArray(login.usernameSelectors || login.usernameSelector, [
-    "input[type=\"email\"]",
-    "input[name=\"identifier\"]",
-    "#identifierId",
-    "input[autocomplete=\"username\"]",
-    "input[aria-label*=\"Email\" i]",
-    "input[aria-label*=\"email\" i]",
-    "input[aria-label*=\"电子邮件\" i]"
-  ]);
-
-  console.log("[keepalive] Step 2: filling Google email");
-
-  await fillFirstVisible(authPage, usernameSelectors, email, {
-    timeoutMs: login.usernameTimeoutMs || 15000,
-    label: "邮箱输入框"
-  });
-
-  const emailNextSelectors = toArray(login.emailNextSelectors || login.nextSelectors || login.nextSelector, [
-    "#identifierNext",
-    "#identifierNext button",
-    "div#identifierNext",
-    "div#identifierNext button",
-    "button:has-text(\"Next\")",
-    "text=Next",
-    "button:has-text(\"下一步\")",
-    "text=下一步"
-  ]);
-
-  console.log("[keepalive] Step 3: clicking email Next");
-
-  await clickFirstVisible(authPage, emailNextSelectors, {
-    timeoutMs: login.emailNextTimeoutMs || 10000,
-    label: "邮箱后的下一步按钮"
-  });
-
-  if (login.waitAfterNextMs) {
-    await sleep(login.waitAfterNextMs);
-  } else {
-    await sleep(5000);
-  }
-
-  await authPage.waitForLoadState("domcontentloaded", {
-    timeout: target.timeoutMs
-  }).catch(() => {});
-
-  console.log(`[keepalive] Auth page URL after email next: ${authPage.url()}`);
-
-  console.log("[keepalive] Step 4: waiting and filling Google password");
-
-  if (login.waitBeforePasswordMs) {
-    await sleep(login.waitBeforePasswordMs);
-  } else {
-    await sleep(8000);
-  }
-
-  await printInputDebug(authPage, "填写密码前页面上的 input 列表");
-
-  const password = env(login.passwordEnv || "APP_LOGIN_PASSWORD");
-  if (!password) {
-    throw new Error(`登录密码 Secret 为空：${login.passwordEnv || "APP_LOGIN_PASSWORD"}`);
-  }
-
-  const passwordSelectors = toArray(login.passwordSelectors || login.passwordSelector, [
-    "input[name=\"Passwd\"]",
-    "input[type=\"password\"]",
-    "input[autocomplete=\"current-password\"]",
-    "input[autocomplete=\"password\"]",
-    "input[aria-label*=\"password\" i]",
-    "input[aria-label*=\"Password\" i]",
-    "input[aria-label*=\"密码\" i]",
-    "input[placeholder*=\"password\" i]",
-    "input[placeholder*=\"Password\" i]",
-    "input[placeholder*=\"密码\" i]",
-    "div#password input",
-    "#password input",
-    "input.whsOnd.zHQkBf"
-  ]);
-
-  await fillFirstVisible(authPage, passwordSelectors, password, {
-    timeoutMs: login.passwordTimeoutMs || 30000,
-    label: "密码输入框"
-  });
-
-  const passwordNextSelectors = toArray(login.passwordNextSelectors || login.submitSelectors || login.submitSelector, [
-    "#passwordNext",
-    "#passwordNext button",
-    "div#passwordNext",
-    "div#passwordNext button",
-    "button:has-text(\"Next\")",
-    "text=Next",
-    "button:has-text(\"下一步\")",
-    "text=下一步",
-    "button[type=\"submit\"]"
-  ]);
-
-  console.log("[keepalive] Step 5: clicking password Next");
-
-  await clickFirstVisible(authPage, passwordNextSelectors, {
-    timeoutMs: login.passwordNextTimeoutMs || 15000,
-    label: "密码后的下一步/登录按钮"
-  });
-
-  if (login.waitAfterLoginMs) {
-    await sleep(login.waitAfterLoginMs);
-  } else {
-    await sleep(10000);
-  }
-
-  if (authPage !== page) {
-    console.log("[keepalive] Waiting Google popup to close.");
-    await authPage.waitForEvent("close", {
-      timeout: login.popupCloseTimeoutMs || 15000
-    }).catch(() => {});
-  }
-
-  await page.waitForLoadState("domcontentloaded", {
-    timeout: target.timeoutMs
-  }).catch(() => {});
-
-  if (target.url) {
-    console.log(`[keepalive] Opening target URL after login: ${target.url}`);
-    await page.goto(target.url, {
-      waitUntil: target.waitUntil || "domcontentloaded",
-      timeout: target.timeoutMs
-    }).catch((error) => {
-      console.log(`[keepalive] page.goto target after login failed: ${error.message}`);
-    });
-  }
-
-  if (login.successSelector) {
-    console.log(`[keepalive] Waiting success selector: ${login.successSelector}`);
-    await page.waitForSelector(login.successSelector, {
-      timeout: login.successTimeoutMs || 20000
-    });
-  }
-
-  console.log("[keepalive] Login flow finished.");
+  throw new Error(`不支持的 login.method：${method}`);
 }
 
 async function evaluatePage(page, target) {
