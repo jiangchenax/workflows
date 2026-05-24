@@ -35,7 +35,6 @@ jobs:
       TARGETS_JSON: ${{ secrets.REALPAGE_TARGETS_JSON }}
 
       APP_LOGIN_EMAIL: ${{ secrets.APP_LOGIN_EMAIL }}
-
       MAILBOX_EMAIL: ${{ secrets.MAILBOX_EMAIL }}
       MAILBOX_APP_PASSWORD: ${{ secrets.MAILBOX_APP_PASSWORD }}
 
