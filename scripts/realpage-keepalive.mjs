@@ -60,10 +60,12 @@ function githubRunUrl() {
 }
 
 function sanitizeFileName(name) {
-  return String(name)
-    .replace(/[^\w.-]+/g, "_")
-    .replace(/^_+|_+$/g, "")
-    .slice(0, 80) || "target";
+  return (
+    String(name)
+      .replace(/[^\w.-]+/g, "_")
+      .replace(/^_+|_+$/g, "")
+      .slice(0, 80) || "target"
+  );
 }
 
 function toArray(value, fallback = []) {
@@ -114,6 +116,10 @@ function normalizeTarget(item, index) {
     expectedSelector: item.expectedSelector || "body",
 
     clickSelector: item.clickSelector || null,
+    clickSelectors: item.clickSelectors || null,
+    clickHrefIncludes: item.clickHrefIncludes || null,
+    clickTimeoutMs: item.clickTimeoutMs || null,
+    waitBeforeClickMs: item.waitBeforeClickMs || 0,
     waitAfterClickMs: item.waitAfterClickMs || 0,
 
     login: item.login || null,
@@ -186,6 +192,118 @@ async function clickFirstVisible(page, selectors, options = {}) {
   }
 
   throw new Error(`未找到或无法点击：${label}。尝试过的选择器：${selectors.join(" | ")}`);
+}
+
+async function printAnchorDebug(page, label = "anchor debug") {
+  try {
+    const anchors = await page.locator("a[href]").evaluateAll((els) =>
+      els.map((el, index) => ({
+        index,
+        href: el.getAttribute("href"),
+        text: el.innerText,
+        dataPhAction: el.getAttribute("data-ph-action"),
+        dataPhLocation: el.getAttribute("data-ph-location"),
+        className: el.getAttribute("class"),
+        visible: !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length)
+      }))
+    );
+
+    console.log(`[keepalive] ${label}: ${JSON.stringify(anchors, null, 2)}`);
+  } catch (error) {
+    console.log(`[keepalive] ${label} failed: ${error.message}`);
+  }
+}
+
+async function clickPostLoginTarget(page, target) {
+  const selectors = toArray(target.clickSelectors || target.clickSelector, []);
+  const hrefIncludes = toArray(target.clickHrefIncludes, []);
+  const timeoutMs = Number(target.clickTimeoutMs || 20000);
+
+  if (selectors.length === 0 && hrefIncludes.length === 0) {
+    return;
+  }
+
+  if (target.waitBeforeClickMs) {
+    console.log(`[keepalive] Waiting before post-login click: ${target.waitBeforeClickMs}ms`);
+    await sleep(Number(target.waitBeforeClickMs));
+  }
+
+  await page.waitForLoadState("domcontentloaded", { timeout: target.timeoutMs }).catch(() => {});
+
+  await printAnchorDebug(page, "点击 workspace 前页面上的链接列表");
+
+  for (const selector of selectors) {
+    try {
+      console.log(`[keepalive] Trying post-login click selector: ${selector}`);
+
+      const locator = page.locator(selector).first();
+
+      await locator.waitFor({
+        state: "attached",
+        timeout: timeoutMs
+      });
+
+      await locator.scrollIntoViewIfNeeded({
+        timeout: 5000
+      }).catch(() => {});
+
+      await locator.click({
+        timeout: 10000,
+        force: true
+      });
+
+      console.log(`[keepalive] Clicked post-login selector: ${selector}`);
+
+      if (target.waitAfterClickMs) {
+        await sleep(Number(target.waitAfterClickMs));
+      }
+
+      return;
+    } catch (error) {
+      console.log(`[keepalive] Post-login selector failed: ${selector} -> ${error.message}`);
+    }
+  }
+
+  if (hrefIncludes.length > 0) {
+    console.log(`[keepalive] Trying post-login hrefIncludes fallback: ${hrefIncludes.join(", ")}`);
+
+    const clicked = await page.evaluate((needles) => {
+      const lowerNeedles = needles.map((x) => String(x).toLowerCase());
+      const anchors = Array.from(document.querySelectorAll("a[href]"));
+
+      const targetAnchor = anchors.find((a) => {
+        const href = String(a.href || a.getAttribute("href") || "").toLowerCase();
+        return lowerNeedles.some((needle) => href.includes(needle));
+      });
+
+      if (!targetAnchor) return false;
+
+      targetAnchor.scrollIntoView({
+        block: "center",
+        inline: "center"
+      });
+
+      targetAnchor.click();
+
+      return true;
+    }, hrefIncludes);
+
+    if (clicked) {
+      console.log("[keepalive] Clicked post-login link by hrefIncludes fallback.");
+
+      if (target.waitAfterClickMs) {
+        await sleep(Number(target.waitAfterClickMs));
+      }
+
+      return;
+    }
+  }
+
+  await printAnchorDebug(page, "点击 workspace 失败时页面上的链接列表");
+
+  throw new Error(
+    `未能点击登录后的 workspace 链接。selectors=${selectors.join(" | ")} hrefIncludes=${hrefIncludes.join(" | ")}`
+  );
 }
 
 async function fillFirstVisible(page, selectors, value, options = {}) {
@@ -321,21 +439,9 @@ function linkMatches(link, magicLinkConfig) {
   const lowerHost = url.hostname.toLowerCase();
   const lowerPath = url.pathname.toLowerCase();
 
-  const blockedHosts = [
-    "ea.pstmrk.it",
-    "static.z.computer"
-  ];
+  const blockedHosts = ["ea.pstmrk.it", "static.z.computer"];
 
-  const blockedExtensions = [
-    ".png",
-    ".jpg",
-    ".jpeg",
-    ".gif",
-    ".webp",
-    ".svg",
-    ".css",
-    ".js"
-  ];
+  const blockedExtensions = [".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".css", ".js"];
 
   if (blockedHosts.some((host) => lowerHost.includes(host))) {
     return false;
@@ -346,16 +452,12 @@ function linkMatches(link, magicLinkConfig) {
   }
 
   if (hostIncludes.length > 0) {
-    const hostOk = hostIncludes.some((item) =>
-      lowerHost.includes(String(item).toLowerCase())
-    );
+    const hostOk = hostIncludes.some((item) => lowerHost.includes(String(item).toLowerCase()));
     if (!hostOk) return false;
   }
 
   if (linkIncludes.length > 0) {
-    const linkOk = linkIncludes.some((item) =>
-      lowerLink.includes(String(item).toLowerCase())
-    );
+    const linkOk = linkIncludes.some((item) => lowerLink.includes(String(item).toLowerCase()));
     if (!linkOk) return false;
   }
 
@@ -401,7 +503,8 @@ async function fetchMagicLinkFromMailbox(magicLinkConfig, startedAtMs) {
   const pass = env(magicLinkConfig.mailboxPasswordEnv || "MAILBOX_APP_PASSWORD");
 
   if (!user) throw new Error(`邮箱账号 Secret 为空：${magicLinkConfig.mailboxUserEnv || "MAILBOX_EMAIL"}`);
-  if (!pass) throw new Error(`邮箱 App Password Secret 为空：${magicLinkConfig.mailboxPasswordEnv || "MAILBOX_APP_PASSWORD"}`);
+  if (!pass)
+    throw new Error(`邮箱 App Password Secret 为空：${magicLinkConfig.mailboxPasswordEnv || "MAILBOX_APP_PASSWORD"}`);
 
   const host = magicLinkConfig.imapHost || "imap.qq.com";
   const port = Number(magicLinkConfig.imapPort || 993);
@@ -456,11 +559,7 @@ async function fetchMagicLinkFromMailbox(magicLinkConfig, startedAtMs) {
           continue;
         }
 
-        const content = [
-          parsed.html || "",
-          parsed.textAsHtml || "",
-          parsed.text || ""
-        ].join("\n");
+        const content = [parsed.html || "", parsed.textAsHtml || "", parsed.text || ""].join("\n");
 
         const links = extractLinksFromText(content);
 
@@ -713,11 +812,7 @@ async function checkTarget(browser, target) {
 
       const status = response ? response.status() : null;
 
-      if (target.clickSelector) {
-        console.log(`[keepalive] Clicking post-login selector: ${target.clickSelector}`);
-        await page.click(target.clickSelector, { timeout: 10000 });
-        if (target.waitAfterClickMs) await sleep(target.waitAfterClickMs);
-      }
+      await clickPostLoginTarget(page, target);
 
       await page.waitForLoadState("domcontentloaded", { timeout: target.timeoutMs }).catch(() => {});
 
@@ -927,9 +1022,10 @@ function shouldNotify(report) {
 
 function buildMessage(report) {
   const s = report.summary;
-  const headline = s.failed === 0
-    ? "✅ 真实业务界面保活正常"
-    : `⚠️ 真实业务界面异常：${s.failed}/${s.total} 个页面失败`;
+  const headline =
+    s.failed === 0
+      ? "✅ 真实业务界面保活正常"
+      : `⚠️ 真实业务界面异常：${s.failed}/${s.total} 个页面失败`;
 
   const lines = [
     headline,
