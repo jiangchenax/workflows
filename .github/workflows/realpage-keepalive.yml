@@ -2,7 +2,6 @@ name: Real Page Keepalive
 
 on:
   schedule:
-    # 每 15 分钟一次，UTC 时间，避开整点
     - cron: "7,22,37,52 * * * *"
 
   workflow_dispatch:
@@ -29,6 +28,9 @@ jobs:
     timeout-minutes: 15
 
     env:
+      # 提前切到 Node.js 24，消除 Node 20 deprecation warning
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
       MANUAL_TARGET_URL: ${{ github.event.inputs.target_url }}
       TARGETS_JSON: ${{ secrets.REALPAGE_TARGETS_JSON }}
 
@@ -39,8 +41,8 @@ jobs:
       DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
       SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
 
-      DEFAULT_TIMEOUT_MS: "45000"
-      DEFAULT_WAIT_UNTIL: "networkidle"
+      DEFAULT_TIMEOUT_MS: "60000"
+      DEFAULT_WAIT_UNTIL: "domcontentloaded"
       DEFAULT_MAX_RETRIES: "2"
 
     steps:
@@ -49,16 +51,17 @@ jobs:
 
       - name: Restore keepalive state
         uses: actions/cache/restore@v4
+        continue-on-error: true
         with:
           path: .realpage_state.json
-          key: realpage-state-${{ github.run_id }}
+          key: realpage-state-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
             realpage-state-
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "24"
 
       - name: Install dependencies
         run: |
@@ -69,12 +72,31 @@ jobs:
         run: |
           node scripts/realpage-keepalive.mjs
 
+      - name: Print report for debugging
+        if: always()
+        run: |
+          echo "===== realpage_report.json ====="
+          if [ -f realpage_report.json ]; then
+            cat realpage_report.json
+          else
+            echo "realpage_report.json not found"
+          fi
+
+          echo ""
+          echo "===== failed marker ====="
+          if [ -f .realpage_failed ]; then
+            cat .realpage_failed
+          else
+            echo "No failed marker"
+          fi
+
       - name: Save keepalive state
         if: always()
         uses: actions/cache/save@v4
+        continue-on-error: true
         with:
           path: .realpage_state.json
-          key: realpage-state-${{ github.run_id }}
+          key: realpage-state-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Upload screenshots and reports
         if: always()
@@ -91,5 +113,5 @@ jobs:
       - name: Mark workflow failed if page unhealthy
         if: ${{ hashFiles('.realpage_failed') != '' }}
         run: |
-          echo "Some real business pages are unhealthy."
+          echo "真实业务页面检测失败。请查看上方 realpage_report.json 和 Artifacts 里的截图。"
           exit 1
