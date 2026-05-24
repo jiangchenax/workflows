@@ -1,0 +1,12 @@
+{
+  "name": "realpage-keepalive",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "keepalive": "node scripts/realpage-keepalive.mjs"
+  },
+  "dependencies": {
+    "@playwright/test": "^1.52.0"
+  }
+}
