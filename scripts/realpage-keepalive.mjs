@@ -430,6 +430,9 @@ async function fetchMagicLinkFromMailbox(magicLinkConfig, startedAtMs) {
 
         const links = extractLinksFromText(content);
         console.log(`[keepalive] Candidate links in matching email: ${links.length}`);
+        for (const link of links) {
+  console.log(`[keepalive] Candidate link host/path: ${maskUrl(link)}`);
+}
 
         const matched = links.find((link) => linkMatches(link, magicLinkConfig));
         if (matched) {
