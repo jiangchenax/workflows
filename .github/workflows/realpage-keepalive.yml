@@ -35,7 +35,9 @@ jobs:
       TARGETS_JSON: ${{ secrets.REALPAGE_TARGETS_JSON }}
 
       APP_LOGIN_EMAIL: ${{ secrets.APP_LOGIN_EMAIL }}
-      APP_LOGIN_PASSWORD: ${{ secrets.APP_LOGIN_PASSWORD }}
+
+      MAILBOX_EMAIL: ${{ secrets.MAILBOX_EMAIL }}
+      MAILBOX_APP_PASSWORD: ${{ secrets.MAILBOX_APP_PASSWORD }}
 
       NOTIFY_MODE: ${{ github.event.inputs.notify_mode || vars.NOTIFY_MODE || 'failure' }}
 
@@ -44,7 +46,7 @@ jobs:
       DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
       SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
 
-      DEFAULT_TIMEOUT_MS: "45000"
+      DEFAULT_TIMEOUT_MS: "60000"
       DEFAULT_WAIT_UNTIL: "domcontentloaded"
       DEFAULT_MAX_RETRIES: "1"
 
@@ -109,22 +111,22 @@ jobs:
           npx playwright install --with-deps chromium
 
       - name: Run real page keepalive
-        timeout-minutes: 7
+        timeout-minutes: 10
         continue-on-error: true
         run: |
           echo "===== Start real page keepalive ====="
           date -u
 
           set +e
-          timeout 360s node scripts/realpage-keepalive.mjs
+          timeout 540s node scripts/realpage-keepalive.mjs
           CODE=$?
 
           echo "===== Keepalive finished with code: $CODE ====="
           echo "KEEPALIVE_EXIT_CODE=$CODE" >> "$GITHUB_ENV"
 
           if [ "$CODE" = "124" ]; then
-            echo "Node script timed out after 360 seconds"
-            echo '{"fatalError":"node script timed out after 360 seconds"}' > realpage_report.json
+            echo "Node script timed out after 540 seconds"
+            echo '{"fatalError":"node script timed out after 540 seconds"}' > realpage_report.json
             echo "timeout" > .realpage_failed
           elif [ "$CODE" != "0" ]; then
             echo "Node script exited with non-zero code: $CODE"
