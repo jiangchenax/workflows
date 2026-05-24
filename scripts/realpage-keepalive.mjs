@@ -217,128 +217,138 @@ async function printAnchorDebug(page, label = "anchor debug") {
 async function clickPostLoginTarget(page, target) {
   const selectors = toArray(target.clickSelectors || target.clickSelector, []);
   const hrefIncludes = toArray(target.clickHrefIncludes, []);
-  const timeoutMs = Number(target.clickTimeoutMs || 20000);
+  const timeoutMs = Number(target.clickTimeoutMs || 90000);
+  const pollIntervalMs = Number(target.clickPollIntervalMs || 3000);
 
   if (selectors.length === 0 && hrefIncludes.length === 0) {
     return;
   }
 
   if (target.waitBeforeClickMs) {
-    console.log(`[keepalive] Waiting before post-login click: ${target.waitBeforeClickMs}ms`);
+    console.log(`[keepalive] Waiting before post-login workspace detection: ${target.waitBeforeClickMs}ms`);
     await sleep(Number(target.waitBeforeClickMs));
   }
 
   await page.waitForLoadState("domcontentloaded", { timeout: target.timeoutMs }).catch(() => {});
-  await page.waitForLoadState("networkidle", { timeout: 10000 }).catch(() => {});
 
-  await printAnchorDebug(page, "跳转 workspace 前页面上的链接列表");
+  const deadline = Date.now() + timeoutMs;
+  let lastUrl = page.url();
 
-  if (hrefIncludes.length > 0) {
-    console.log(`[keepalive] Trying to extract workspace href by includes: ${hrefIncludes.join(", ")}`);
+  while (Date.now() < deadline) {
+    lastUrl = page.url();
+    console.log(`[keepalive] Waiting workspace link. Current URL: ${lastUrl}`);
 
-    const workspaceHref = await page.evaluate((needles) => {
-      const lowerNeedles = needles.map((x) => String(x).toLowerCase());
-      const anchors = Array.from(document.querySelectorAll("a[href]"));
+    await page.waitForLoadState("domcontentloaded", { timeout: 10000 }).catch(() => {});
+    await page.waitForLoadState("networkidle", { timeout: 10000 }).catch(() => {});
 
-      const targetAnchor = anchors.find((a) => {
-        const href = String(a.href || a.getAttribute("href") || "").toLowerCase();
-        const text = String(a.innerText || "").toLowerCase();
+    const bodyText = await page.locator("body").innerText({ timeout: 5000 }).catch(() => "");
+    console.log(`[keepalive] Workspace page text preview: ${bodyText.slice(0, 300)}`);
 
-        return lowerNeedles.some((needle) => {
-          const n = String(needle).toLowerCase();
-          return href.includes(n) || text.includes(n);
+    // 1. 优先从所有 a[href] 中提取 workspace 链接，然后直接跳转
+    if (hrefIncludes.length > 0) {
+      const workspaceHref = await page.evaluate((needles) => {
+        const lowerNeedles = needles.map((x) => String(x).toLowerCase());
+        const anchors = Array.from(document.querySelectorAll("a[href]"));
+
+        const targetAnchor = anchors.find((a) => {
+          const href = String(a.href || a.getAttribute("href") || "").toLowerCase();
+          const text = String(a.innerText || "").toLowerCase();
+
+          return lowerNeedles.some((needle) => {
+            const n = String(needle).toLowerCase();
+            return href.includes(n) || text.includes(n);
+          });
         });
-      });
 
-      if (!targetAnchor) return "";
+        if (!targetAnchor) return "";
 
-      return targetAnchor.href || targetAnchor.getAttribute("href") || "";
-    }, hrefIncludes);
+        return targetAnchor.href || targetAnchor.getAttribute("href") || "";
+      }, hrefIncludes);
 
-    if (workspaceHref) {
-      console.log(`[keepalive] Workspace href found: ${maskUrl(workspaceHref)}`);
-      console.log("[keepalive] Navigating directly to workspace href.");
+      if (workspaceHref) {
+        console.log(`[keepalive] Workspace href found: ${maskUrl(workspaceHref)}`);
+        console.log("[keepalive] Navigating directly to workspace href.");
 
-      await page.goto(workspaceHref, {
-        waitUntil: target.waitUntil || "domcontentloaded",
-        timeout: target.timeoutMs
-      });
-
-      await page.waitForLoadState("domcontentloaded", { timeout: target.timeoutMs }).catch(() => {});
-      await page.waitForLoadState("networkidle", { timeout: 10000 }).catch(() => {});
-
-      if (target.waitAfterClickMs) {
-        await sleep(Number(target.waitAfterClickMs));
-      }
-
-      console.log(`[keepalive] Current URL after workspace goto: ${page.url()}`);
-      return;
-    }
-
-    console.log("[keepalive] No workspace href found by hrefIncludes, trying selectors.");
-  }
-
-  for (const selector of selectors) {
-    try {
-      console.log(`[keepalive] Trying post-login click selector: ${selector}`);
-
-      const locator = page.locator(selector).first();
-
-      await locator.waitFor({
-        state: "attached",
-        timeout: timeoutMs
-      });
-
-      const href = await locator.getAttribute("href").catch(() => "");
-
-      if (href) {
-        const absoluteHref = new URL(href, page.url()).toString();
-
-        console.log(`[keepalive] Selector has href: ${maskUrl(absoluteHref)}`);
-        console.log("[keepalive] Navigating directly to selector href.");
-
-        await page.goto(absoluteHref, {
+        await page.goto(workspaceHref, {
           waitUntil: target.waitUntil || "domcontentloaded",
           timeout: target.timeoutMs
         });
 
         await page.waitForLoadState("domcontentloaded", { timeout: target.timeoutMs }).catch(() => {});
-        await page.waitForLoadState("networkidle", { timeout: 10000 }).catch(() => {});
+        await page.waitForLoadState("networkidle", { timeout: 15000 }).catch(() => {});
 
         if (target.waitAfterClickMs) {
           await sleep(Number(target.waitAfterClickMs));
         }
 
-        console.log(`[keepalive] Current URL after selector href goto: ${page.url()}`);
+        console.log(`[keepalive] Current URL after workspace goto: ${page.url()}`);
         return;
       }
-
-      await locator.scrollIntoViewIfNeeded({
-        timeout: 5000
-      }).catch(() => {});
-
-      await locator.click({
-        timeout: 10000,
-        force: true
-      });
-
-      console.log(`[keepalive] Clicked post-login selector: ${selector}`);
-
-      if (target.waitAfterClickMs) {
-        await sleep(Number(target.waitAfterClickMs));
-      }
-
-      console.log(`[keepalive] Current URL after selector click: ${page.url()}`);
-      return;
-    } catch (error) {
-      console.log(`[keepalive] Post-login selector failed: ${selector} -> ${error.message}`);
     }
+
+    // 2. 如果 href 还没出现，再尝试 CSS selector
+    for (const selector of selectors) {
+      try {
+        console.log(`[keepalive] Trying post-login selector while waiting: ${selector}`);
+
+        const locator = page.locator(selector).first();
+        const count = await locator.count().catch(() => 0);
+
+        if (count <= 0) {
+          continue;
+        }
+
+        await locator.waitFor({
+          state: "attached",
+          timeout: 3000
+        });
+
+        const href = await locator.getAttribute("href").catch(() => "");
+
+        if (href) {
+          const absoluteHref = new URL(href, page.url()).toString();
+
+          console.log(`[keepalive] Selector href found: ${maskUrl(absoluteHref)}`);
+          console.log("[keepalive] Navigating directly to selector href.");
+
+          await page.goto(absoluteHref, {
+            waitUntil: target.waitUntil || "domcontentloaded",
+            timeout: target.timeoutMs
+          });
+
+          await page.waitForLoadState("domcontentloaded", { timeout: target.timeoutMs }).catch(() => {});
+          await page.waitForLoadState("networkidle", { timeout: 15000 }).catch(() => {});
+
+          if (target.waitAfterClickMs) {
+            await sleep(Number(target.waitAfterClickMs));
+          }
+
+          console.log(`[keepalive] Current URL after selector href goto: ${page.url()}`);
+          return;
+        }
+
+        await locator.scrollIntoViewIfNeeded({ timeout: 3000 }).catch(() => {});
+        await locator.click({ timeout: 5000, force: true });
+
+        if (target.waitAfterClickMs) {
+          await sleep(Number(target.waitAfterClickMs));
+        }
+
+        console.log(`[keepalive] Current URL after selector click: ${page.url()}`);
+        return;
+      } catch (error) {
+        console.log(`[keepalive] Post-login selector not ready: ${selector} -> ${error.message}`);
+      }
+    }
+
+    console.log(`[keepalive] Workspace link not ready yet, wait ${pollIntervalMs}ms then retry.`);
+    await sleep(pollIntervalMs);
   }
 
-  await printAnchorDebug(page, "跳转 workspace 失败时页面上的链接列表");
+  await printAnchorDebug(page, "等待 workspace 链接超时后页面上的链接列表");
 
   throw new Error(
-    `未能跳转到登录后的 workspace。selectors=${selectors.join(" | ")} hrefIncludes=${hrefIncludes.join(" | ")}`
+    `等待登录后的 workspace 链接超时。lastUrl=${lastUrl} selectors=${selectors.join(" | ")} hrefIncludes=${hrefIncludes.join(" | ")}`
   );
 }
 
