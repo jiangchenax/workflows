@@ -317,16 +317,44 @@ function linkMatches(link, magicLinkConfig) {
     return false;
   }
 
+  const lowerLink = link.toLowerCase();
+  const lowerHost = url.hostname.toLowerCase();
+  const lowerPath = url.pathname.toLowerCase();
+
+  const blockedHosts = [
+    "ea.pstmrk.it",
+    "static.z.computer"
+  ];
+
+  const blockedExtensions = [
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".webp",
+    ".svg",
+    ".css",
+    ".js"
+  ];
+
+  if (blockedHosts.some((host) => lowerHost.includes(host))) {
+    return false;
+  }
+
+  if (blockedExtensions.some((ext) => lowerPath.endsWith(ext))) {
+    return false;
+  }
+
   if (hostIncludes.length > 0) {
     const hostOk = hostIncludes.some((item) =>
-      url.hostname.toLowerCase().includes(String(item).toLowerCase())
+      lowerHost.includes(String(item).toLowerCase())
     );
     if (!hostOk) return false;
   }
 
   if (linkIncludes.length > 0) {
     const linkOk = linkIncludes.some((item) =>
-      link.toLowerCase().includes(String(item).toLowerCase())
+      lowerLink.includes(String(item).toLowerCase())
     );
     if (!linkOk) return false;
   }
@@ -369,7 +397,7 @@ async function fetchMagicLinkFromMailbox(magicLinkConfig, startedAtMs) {
   if (!user) throw new Error(`邮箱账号 Secret 为空：${magicLinkConfig.mailboxUserEnv || "MAILBOX_EMAIL"}`);
   if (!pass) throw new Error(`邮箱 App Password Secret 为空：${magicLinkConfig.mailboxPasswordEnv || "MAILBOX_APP_PASSWORD"}`);
 
-  const host = magicLinkConfig.imapHost || "imap.gmail.com";
+  const host = magicLinkConfig.imapHost || "imap.qq.com";
   const port = Number(magicLinkConfig.imapPort || 993);
   const secure = magicLinkConfig.imapSecure !== false;
 
@@ -429,13 +457,16 @@ async function fetchMagicLinkFromMailbox(magicLinkConfig, startedAtMs) {
         ].join("\n");
 
         const links = extractLinksFromText(content);
+
         console.log(`[keepalive] Candidate links in matching email: ${links.length}`);
         for (const link of links) {
-  console.log(`[keepalive] Candidate link host/path: ${maskUrl(link)}`);
-}
+          console.log(`[keepalive] Candidate link host/path: ${maskUrl(link)}`);
+        }
 
         const matched = links.find((link) => linkMatches(link, magicLinkConfig));
+
         if (matched) {
+          console.log(`[keepalive] Selected magic link host/path: ${maskUrl(matched)}`);
           await client.logout().catch(() => {});
           console.log(`[keepalive] Magic link found: ${maskUrl(matched)}`);
           return matched;
