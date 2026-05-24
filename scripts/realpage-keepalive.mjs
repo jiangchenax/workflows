@@ -229,8 +229,54 @@ async function clickPostLoginTarget(page, target) {
   }
 
   await page.waitForLoadState("domcontentloaded", { timeout: target.timeoutMs }).catch(() => {});
+  await page.waitForLoadState("networkidle", { timeout: 10000 }).catch(() => {});
 
-  await printAnchorDebug(page, "点击 workspace 前页面上的链接列表");
+  await printAnchorDebug(page, "跳转 workspace 前页面上的链接列表");
+
+  if (hrefIncludes.length > 0) {
+    console.log(`[keepalive] Trying to extract workspace href by includes: ${hrefIncludes.join(", ")}`);
+
+    const workspaceHref = await page.evaluate((needles) => {
+      const lowerNeedles = needles.map((x) => String(x).toLowerCase());
+      const anchors = Array.from(document.querySelectorAll("a[href]"));
+
+      const targetAnchor = anchors.find((a) => {
+        const href = String(a.href || a.getAttribute("href") || "").toLowerCase();
+        const text = String(a.innerText || "").toLowerCase();
+
+        return lowerNeedles.some((needle) => {
+          const n = String(needle).toLowerCase();
+          return href.includes(n) || text.includes(n);
+        });
+      });
+
+      if (!targetAnchor) return "";
+
+      return targetAnchor.href || targetAnchor.getAttribute("href") || "";
+    }, hrefIncludes);
+
+    if (workspaceHref) {
+      console.log(`[keepalive] Workspace href found: ${maskUrl(workspaceHref)}`);
+      console.log("[keepalive] Navigating directly to workspace href.");
+
+      await page.goto(workspaceHref, {
+        waitUntil: target.waitUntil || "domcontentloaded",
+        timeout: target.timeoutMs
+      });
+
+      await page.waitForLoadState("domcontentloaded", { timeout: target.timeoutMs }).catch(() => {});
+      await page.waitForLoadState("networkidle", { timeout: 10000 }).catch(() => {});
+
+      if (target.waitAfterClickMs) {
+        await sleep(Number(target.waitAfterClickMs));
+      }
+
+      console.log(`[keepalive] Current URL after workspace goto: ${page.url()}`);
+      return;
+    }
+
+    console.log("[keepalive] No workspace href found by hrefIncludes, trying selectors.");
+  }
 
   for (const selector of selectors) {
     try {
@@ -242,6 +288,30 @@ async function clickPostLoginTarget(page, target) {
         state: "attached",
         timeout: timeoutMs
       });
+
+      const href = await locator.getAttribute("href").catch(() => "");
+
+      if (href) {
+        const absoluteHref = new URL(href, page.url()).toString();
+
+        console.log(`[keepalive] Selector has href: ${maskUrl(absoluteHref)}`);
+        console.log("[keepalive] Navigating directly to selector href.");
+
+        await page.goto(absoluteHref, {
+          waitUntil: target.waitUntil || "domcontentloaded",
+          timeout: target.timeoutMs
+        });
+
+        await page.waitForLoadState("domcontentloaded", { timeout: target.timeoutMs }).catch(() => {});
+        await page.waitForLoadState("networkidle", { timeout: 10000 }).catch(() => {});
+
+        if (target.waitAfterClickMs) {
+          await sleep(Number(target.waitAfterClickMs));
+        }
+
+        console.log(`[keepalive] Current URL after selector href goto: ${page.url()}`);
+        return;
+      }
 
       await locator.scrollIntoViewIfNeeded({
         timeout: 5000
@@ -258,51 +328,17 @@ async function clickPostLoginTarget(page, target) {
         await sleep(Number(target.waitAfterClickMs));
       }
 
+      console.log(`[keepalive] Current URL after selector click: ${page.url()}`);
       return;
     } catch (error) {
       console.log(`[keepalive] Post-login selector failed: ${selector} -> ${error.message}`);
     }
   }
 
-  if (hrefIncludes.length > 0) {
-    console.log(`[keepalive] Trying post-login hrefIncludes fallback: ${hrefIncludes.join(", ")}`);
-
-    const clicked = await page.evaluate((needles) => {
-      const lowerNeedles = needles.map((x) => String(x).toLowerCase());
-      const anchors = Array.from(document.querySelectorAll("a[href]"));
-
-      const targetAnchor = anchors.find((a) => {
-        const href = String(a.href || a.getAttribute("href") || "").toLowerCase();
-        return lowerNeedles.some((needle) => href.includes(needle));
-      });
-
-      if (!targetAnchor) return false;
-
-      targetAnchor.scrollIntoView({
-        block: "center",
-        inline: "center"
-      });
-
-      targetAnchor.click();
-
-      return true;
-    }, hrefIncludes);
-
-    if (clicked) {
-      console.log("[keepalive] Clicked post-login link by hrefIncludes fallback.");
-
-      if (target.waitAfterClickMs) {
-        await sleep(Number(target.waitAfterClickMs));
-      }
-
-      return;
-    }
-  }
-
-  await printAnchorDebug(page, "点击 workspace 失败时页面上的链接列表");
+  await printAnchorDebug(page, "跳转 workspace 失败时页面上的链接列表");
 
   throw new Error(
-    `未能点击登录后的 workspace 链接。selectors=${selectors.join(" | ")} hrefIncludes=${hrefIncludes.join(" | ")}`
+    `未能跳转到登录后的 workspace。selectors=${selectors.join(" | ")} hrefIncludes=${hrefIncludes.join(" | ")}`
   );
 }
 
@@ -440,7 +476,6 @@ function linkMatches(link, magicLinkConfig) {
   const lowerPath = url.pathname.toLowerCase();
 
   const blockedHosts = ["ea.pstmrk.it", "static.z.computer"];
-
   const blockedExtensions = [".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".css", ".js"];
 
   if (blockedHosts.some((host) => lowerHost.includes(host))) {
@@ -502,9 +537,13 @@ async function fetchMagicLinkFromMailbox(magicLinkConfig, startedAtMs) {
   const user = env(magicLinkConfig.mailboxUserEnv || "MAILBOX_EMAIL");
   const pass = env(magicLinkConfig.mailboxPasswordEnv || "MAILBOX_APP_PASSWORD");
 
-  if (!user) throw new Error(`邮箱账号 Secret 为空：${magicLinkConfig.mailboxUserEnv || "MAILBOX_EMAIL"}`);
-  if (!pass)
+  if (!user) {
+    throw new Error(`邮箱账号 Secret 为空：${magicLinkConfig.mailboxUserEnv || "MAILBOX_EMAIL"}`);
+  }
+
+  if (!pass) {
     throw new Error(`邮箱 App Password Secret 为空：${magicLinkConfig.mailboxPasswordEnv || "MAILBOX_APP_PASSWORD"}`);
+  }
 
   const host = magicLinkConfig.imapHost || "imap.qq.com";
   const port = Number(magicLinkConfig.imapPort || 993);
@@ -815,6 +854,7 @@ async function checkTarget(browser, target) {
       await clickPostLoginTarget(page, target);
 
       await page.waitForLoadState("domcontentloaded", { timeout: target.timeoutMs }).catch(() => {});
+      await page.waitForLoadState("networkidle", { timeout: 10000 }).catch(() => {});
 
       const evaluation = await evaluatePage(page, target);
 
