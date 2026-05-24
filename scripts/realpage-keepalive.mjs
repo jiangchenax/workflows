@@ -85,7 +85,8 @@ function normalizeTarget(item, index) {
       viewport: { width: 1365, height: 768 },
       screenshot: true,
       fullPageScreenshot: true,
-      expectedSelector: "body"
+      expectedSelector: "body",
+      login: null
     };
   }
 
@@ -151,10 +152,45 @@ function loadTargets() {
   return parsed.map((item, index) => normalizeTarget(item, index));
 }
 
+async function printInputDebug(page, label = "input debug") {
+  try {
+    const currentUrl = page.url();
+    const title = await page.title().catch(() => "");
+
+    const inputs = await page.locator("input").evaluateAll((els) =>
+      els.map((el, index) => ({
+        index,
+        type: el.getAttribute("type"),
+        name: el.getAttribute("name"),
+        id: el.getAttribute("id"),
+        ariaLabel: el.getAttribute("aria-label"),
+        autocomplete: el.getAttribute("autocomplete"),
+        placeholder: el.getAttribute("placeholder"),
+        className: el.getAttribute("class"),
+        jsname: el.getAttribute("jsname"),
+        dataInitialValue: el.getAttribute("data-initial-value"),
+        visible: !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length),
+        disabled: el.hasAttribute("disabled"),
+        readOnly: el.hasAttribute("readonly")
+      }))
+    );
+
+    const bodyText = await page.locator("body").innerText({ timeout: 5000 }).catch(() => "");
+
+    console.log(`[keepalive] ${label}`);
+    console.log(`[keepalive] Current URL: ${currentUrl}`);
+    console.log(`[keepalive] Page title: ${title}`);
+    console.log(`[keepalive] Body text preview: ${bodyText.slice(0, 800)}`);
+    console.log(`[keepalive] Inputs: ${JSON.stringify(inputs, null, 2)}`);
+  } catch (error) {
+    console.log(`[keepalive] ${label} failed: ${error.message}`);
+  }
+}
+
 async function locatorExists(page, selector, timeoutMs = 2500) {
   try {
     const locator = page.locator(selector).first();
-    await locator.waitFor({ state: "visible", timeout: timeoutMs });
+    await locator.waitFor({ state: "attached", timeout: timeoutMs });
     return locator;
   } catch {
     return null;
@@ -186,27 +222,60 @@ async function clickFirstVisible(page, selectors, options = {}) {
 }
 
 async function fillFirstVisible(page, selectors, value, options = {}) {
-  const timeoutMs = options.timeoutMs || 8000;
+  const timeoutMs = options.timeoutMs || 15000;
   const label = options.label || "input";
+  const debugOnFailure = options.debugOnFailure !== false;
 
   console.log(`[keepalive] Trying to fill: ${label}`);
 
-  for (const selector of selectors) {
-    console.log(`[keepalive]   selector: ${selector}`);
+  const deadline = Date.now() + timeoutMs;
+  let lastError = "";
 
-    const locator = await locatorExists(page, selector, timeoutMs);
-    if (!locator) continue;
+  while (Date.now() < deadline) {
+    for (const selector of selectors) {
+      console.log(`[keepalive]   selector: ${selector}`);
 
-    try {
-      await locator.fill(value, { timeout: timeoutMs });
-      console.log(`[keepalive] Filled ${label} with selector: ${selector}`);
-      return selector;
-    } catch (error) {
-      console.log(`[keepalive] Fill failed for selector ${selector}: ${error.message}`);
+      try {
+        const locator = page.locator(selector).first();
+
+        const count = await locator.count().catch(() => 0);
+        if (count <= 0) {
+          continue;
+        }
+
+        await locator.waitFor({ state: "attached", timeout: 1500 }).catch(() => {});
+
+        const visible = await locator.isVisible().catch(() => false);
+        const enabled = await locator.isEnabled().catch(() => false);
+
+        console.log(`[keepalive]   found selector=${selector}, visible=${visible}, enabled=${enabled}`);
+
+        if (!enabled) {
+          lastError = `selector ${selector} found but not enabled`;
+          continue;
+        }
+
+        await locator.click({ timeout: 3000 }).catch(() => {});
+        await locator.fill(value, { timeout: 5000 });
+
+        console.log(`[keepalive] Filled ${label} with selector: ${selector}`);
+        return selector;
+      } catch (error) {
+        lastError = error.message;
+        console.log(`[keepalive] Fill failed for selector ${selector}: ${error.message}`);
+      }
     }
+
+    await sleep(1000);
   }
 
-  throw new Error(`未找到或无法填写：${label}。尝试过的选择器：${selectors.join(" | ")}`);
+  if (debugOnFailure) {
+    await printInputDebug(page, `未找到 ${label} 时页面上的 input 列表`);
+  }
+
+  throw new Error(
+    `未找到或无法填写：${label}。尝试过的选择器：${selectors.join(" | ")}。最后错误：${lastError}`
+  );
 }
 
 async function takeScreenshot(page, target, suffix = "") {
@@ -324,12 +393,18 @@ async function loginIfNeeded(page, target) {
   }
 
   const email = env(login.usernameEnv || "APP_LOGIN_EMAIL");
-  if (!email) throw new Error(`登录邮箱 Secret 为空：${login.usernameEnv || "APP_LOGIN_EMAIL"}`);
+  if (!email) {
+    throw new Error(`登录邮箱 Secret 为空：${login.usernameEnv || "APP_LOGIN_EMAIL"}`);
+  }
 
   const usernameSelectors = toArray(login.usernameSelectors || login.usernameSelector, [
     "input[type=\"email\"]",
     "input[name=\"identifier\"]",
-    "#identifierId"
+    "#identifierId",
+    "input[autocomplete=\"username\"]",
+    "input[aria-label*=\"Email\" i]",
+    "input[aria-label*=\"email\" i]",
+    "input[aria-label*=\"电子邮件\" i]"
   ]);
 
   console.log("[keepalive] Step 2: filling Google email");
@@ -342,6 +417,8 @@ async function loginIfNeeded(page, target) {
   const emailNextSelectors = toArray(login.emailNextSelectors || login.nextSelectors || login.nextSelector, [
     "#identifierNext",
     "#identifierNext button",
+    "div#identifierNext",
+    "div#identifierNext button",
     "button:has-text(\"Next\")",
     "text=Next",
     "button:has-text(\"下一步\")",
@@ -358,7 +435,7 @@ async function loginIfNeeded(page, target) {
   if (login.waitAfterNextMs) {
     await sleep(login.waitAfterNextMs);
   } else {
-    await sleep(2500);
+    await sleep(5000);
   }
 
   await authPage.waitForLoadState("domcontentloaded", {
@@ -367,24 +444,47 @@ async function loginIfNeeded(page, target) {
 
   console.log(`[keepalive] Auth page URL after email next: ${authPage.url()}`);
 
+  console.log("[keepalive] Step 4: waiting and filling Google password");
+
+  if (login.waitBeforePasswordMs) {
+    await sleep(login.waitBeforePasswordMs);
+  } else {
+    await sleep(8000);
+  }
+
+  await printInputDebug(authPage, "填写密码前页面上的 input 列表");
+
   const password = env(login.passwordEnv || "APP_LOGIN_PASSWORD");
-  if (!password) throw new Error(`登录密码 Secret 为空：${login.passwordEnv || "APP_LOGIN_PASSWORD"}`);
+  if (!password) {
+    throw new Error(`登录密码 Secret 为空：${login.passwordEnv || "APP_LOGIN_PASSWORD"}`);
+  }
 
   const passwordSelectors = toArray(login.passwordSelectors || login.passwordSelector, [
+    "input[name=\"Passwd\"]",
     "input[type=\"password\"]",
-    "input[name=\"Passwd\"]"
+    "input[autocomplete=\"current-password\"]",
+    "input[autocomplete=\"password\"]",
+    "input[aria-label*=\"password\" i]",
+    "input[aria-label*=\"Password\" i]",
+    "input[aria-label*=\"密码\" i]",
+    "input[placeholder*=\"password\" i]",
+    "input[placeholder*=\"Password\" i]",
+    "input[placeholder*=\"密码\" i]",
+    "div#password input",
+    "#password input",
+    "input.whsOnd.zHQkBf"
   ]);
 
-  console.log("[keepalive] Step 4: filling Google password");
-
   await fillFirstVisible(authPage, passwordSelectors, password, {
-    timeoutMs: login.passwordTimeoutMs || 15000,
+    timeoutMs: login.passwordTimeoutMs || 30000,
     label: "密码输入框"
   });
 
   const passwordNextSelectors = toArray(login.passwordNextSelectors || login.submitSelectors || login.submitSelector, [
     "#passwordNext",
     "#passwordNext button",
+    "div#passwordNext",
+    "div#passwordNext button",
     "button:has-text(\"Next\")",
     "text=Next",
     "button:has-text(\"下一步\")",
@@ -395,34 +495,14 @@ async function loginIfNeeded(page, target) {
   console.log("[keepalive] Step 5: clicking password Next");
 
   await clickFirstVisible(authPage, passwordNextSelectors, {
-    timeoutMs: login.passwordNextTimeoutMs || 10000,
+    timeoutMs: login.passwordNextTimeoutMs || 15000,
     label: "密码后的下一步/登录按钮"
   });
 
   if (login.waitAfterLoginMs) {
     await sleep(login.waitAfterLoginMs);
   } else {
-    await sleep(8000);
-  }
-
-  const suspiciousTexts = [
-    "Verify it’s you",
-    "Verify it's you",
-    "2-Step Verification",
-    "Enter a verification code",
-    "This browser or app may not be secure",
-    "Couldn’t sign you in",
-    "Couldn't sign you in",
-    "Captcha",
-    "验证码",
-    "两步验证"
-  ];
-
-  const authBodyText = await authPage.locator("body").innerText({ timeout: 5000 }).catch(() => "");
-  for (const text of suspiciousTexts) {
-    if (authBodyText.includes(text)) {
-      throw new Error(`Google 登录被安全验证拦截：页面出现 "${text}"`);
-    }
+    await sleep(10000);
   }
 
   if (authPage !== page) {
