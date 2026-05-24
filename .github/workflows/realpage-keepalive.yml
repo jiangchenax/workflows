@@ -10,7 +10,7 @@ on:
       notify_mode:
         description: "通知模式：change / failure / always / off"
         required: false
-        default: "change"
+        default: "failure"
       target_url:
         description: "临时测试 URL，可留空"
         required: false
@@ -27,7 +27,7 @@ jobs:
   realpage-keepalive:
     name: Real Page Keepalive
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
 
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
@@ -35,14 +35,17 @@ jobs:
       MANUAL_TARGET_URL: ${{ github.event.inputs.target_url || '' }}
       TARGETS_JSON: ${{ secrets.REALPAGE_TARGETS_JSON }}
 
-      NOTIFY_MODE: ${{ github.event.inputs.notify_mode || vars.NOTIFY_MODE || 'change' }}
+      APP_LOGIN_EMAIL: ${{ secrets.APP_LOGIN_EMAIL }}
+      APP_LOGIN_PASSWORD: ${{ secrets.APP_LOGIN_PASSWORD }}
+
+      NOTIFY_MODE: ${{ github.event.inputs.notify_mode || vars.NOTIFY_MODE || 'failure' }}
 
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
       DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
       SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
 
-      DEFAULT_TIMEOUT_MS: "60000"
+      DEFAULT_TIMEOUT_MS: "90000"
       DEFAULT_WAIT_UNTIL: "domcontentloaded"
       DEFAULT_MAX_RETRIES: "2"
 
@@ -52,7 +55,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v5
 
       - name: Set up Node.js
         uses: actions/setup-node@v6
@@ -70,20 +73,20 @@ jobs:
           ls -la
 
           echo ""
-          echo "===== scripts directory ====="
-          if [ -d scripts ]; then
-            ls -la scripts
-          else
-            echo "scripts directory not found"
-            exit 1
-          fi
-
-          echo ""
           echo "===== package.json ====="
           if [ -f package.json ]; then
             cat package.json
           else
             echo "package.json not found"
+            exit 1
+          fi
+
+          echo ""
+          echo "===== scripts directory ====="
+          if [ -d scripts ]; then
+            ls -la scripts
+          else
+            echo "scripts directory not found"
             exit 1
           fi
 
@@ -151,7 +154,8 @@ jobs:
 
       - name: Upload screenshots and reports
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v4
+        continue-on-error: true
         with:
           name: realpage-keepalive-report
           path: |
